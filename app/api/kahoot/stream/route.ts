@@ -53,50 +53,50 @@ export async function GET(request: NextRequest) {
         sendEvent("joined", { message: "Successfully joined the game!" });
       });
 
+      let quizData: any = null;
+      let currentQuestionIndex = 0;
+
       client.on("QuizStart", (quiz: any) => {
         console.log("✓ Quiz started:", quiz);
+        quizData = quiz;
         sendEvent("quizStart", { quiz });
-      });
-
-      // QuestionReady fires BEFORE QuestionStart - this gives us the earliest data!
-      client.on("QuestionReady", (question: any) => {
-        console.log("✓ Question READY (early data):", question);
-        console.log("QuestionReady object:", JSON.stringify(question, null, 2));
         
-        const answers = question.choices?.map((choice: any) => ({
-          text: choice.answer,
-          correct: choice.correct
-        })) || [];
-        
-        // Send question data as soon as we have it
-        if (answers.length > 0) {
-          sendEvent("question", {
-            question: question.title || question.question || "Question",
-            answers: answers,
-            questionIndex: question.gameBlockIndex || question.questionIndex || 0,
-            timeLeft: question.timeRemaining,
-            early: true, // Flag to indicate this is early data
-          });
+        // Send first question immediately from QuizStart data
+        if (quiz.firstGameBlockData) {
+          const firstQ = quiz.firstGameBlockData;
+          const answers = firstQ.choices?.map((choice: any) => ({
+            text: choice.answer || "",
+            correct: choice.correct
+          })).filter((a: any) => a.text) || [];
+          
+          if (answers.length > 0) {
+            // Remove HTML entities from question
+            const cleanQuestion = (firstQ.question || "Question").replace(/&nbsp;/g, ' ').replace(/<[^>]*>/g, '');
+            
+            console.log("📤 Sending first question from QuizStart");
+            sendEvent("question", {
+              question: cleanQuestion,
+              answers: answers,
+              questionIndex: 0,
+              timeLeft: firstQ.time,
+            });
+          }
         }
       });
 
+      client.on("QuestionReady", (question: any) => {
+        console.log("✓ Question READY");
+        // This event fires but doesn't have the actual question data
+        // We'll wait for QuestionStart to get the index
+      });
+
       client.on("QuestionStart", (question: any) => {
-        console.log("✓ Question START:", question);
-        console.log("QuestionStart object:", JSON.stringify(question, null, 2));
+        console.log("✓ Question START - Index:", question.gameBlockIndex);
+        currentQuestionIndex = question.gameBlockIndex || 0;
         
-        const answers = question.choices?.map((choice: any) => ({
-          text: choice.answer,
-          correct: choice.correct
-        })) || [];
-        
-        // Only send if we didn't already send from QuestionReady
-        // or if QuestionStart has more complete data
-        sendEvent("question", {
-          question: question.title || question.question || "Question",
-          answers: answers,
-          questionIndex: question.gameBlockIndex || question.questionIndex || 0,
-          timeLeft: question.timeRemaining,
-        });
+        // If this is not the first question (already sent from QuizStart)
+        // we need to fetch it from somewhere else or wait for the host to provide it
+        // For now, we've already sent the first question from QuizStart
       });
 
       client.on("QuestionEnd", (result: any) => {
