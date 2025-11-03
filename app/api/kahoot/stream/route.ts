@@ -53,16 +53,47 @@ export async function GET(request: NextRequest) {
         sendEvent("joined", { message: "Successfully joined the game!" });
       });
 
-      let quizData: any = null;
+      let allQuestions: any[] = [];
       let currentQuestionIndex = 0;
 
-      client.on("QuizStart", (quiz: any) => {
+      client.on("QuizStart", async (quiz: any) => {
         console.log("✓ Quiz started:", quiz);
-        quizData = quiz;
         sendEvent("quizStart", { quiz });
         
-        // Send first question immediately from QuizStart data
-        if (quiz.firstGameBlockData) {
+        // Try to fetch all questions from Kahoot API
+        const gameId = quiz.gameId;
+        if (gameId) {
+          console.log("🔍 Fetching all questions for gameId:", gameId);
+          try {
+            const response = await fetch(`https://create.kahoot.it/rest/kahoots/${gameId}`);
+            if (response.ok) {
+              const quizData = await response.json();
+              console.log("✅ Fetched quiz data successfully!");
+              
+              // Store all questions
+              quizData.questions?.forEach((q: any, index: number) => {
+                const cleanQuestion = (q.question || "Question").replace(/&nbsp;/g, ' ').replace(/<[^>]*>/g, '');
+                const answers = q.choices?.map((choice: any) => ({
+                  text: choice.answer || "",
+                  correct: choice.correct
+                })).filter((a: any) => a.text) || [];
+                
+                allQuestions[index] = {
+                  question: cleanQuestion,
+                  answers: answers,
+                  timeLeft: q.time,
+                };
+              });
+              
+              console.log(`📚 Stored ${allQuestions.length} questions`);
+            }
+          } catch (error) {
+            console.log("⚠️ Could not fetch quiz data from API, using fallback");
+          }
+        }
+        
+        // Fallback: Store first question from QuizStart
+        if (quiz.firstGameBlockData && !allQuestions[0]) {
           const firstQ = quiz.firstGameBlockData;
           const answers = firstQ.choices?.map((choice: any) => ({
             text: choice.answer || "",
@@ -70,33 +101,90 @@ export async function GET(request: NextRequest) {
           })).filter((a: any) => a.text) || [];
           
           if (answers.length > 0) {
-            // Remove HTML entities from question
             const cleanQuestion = (firstQ.question || "Question").replace(/&nbsp;/g, ' ').replace(/<[^>]*>/g, '');
             
-            console.log("📤 Sending first question from QuizStart");
-            sendEvent("question", {
+            allQuestions[0] = {
               question: cleanQuestion,
               answers: answers,
-              questionIndex: 0,
               timeLeft: firstQ.time,
-            });
+            };
           }
+        }
+        
+        // Send first question immediately
+        if (allQuestions[0]) {
+          console.log("📤 Sending first question");
+          sendEvent("question", {
+            ...allQuestions[0],
+            questionIndex: 0,
+          });
         }
       });
 
       client.on("QuestionReady", (question: any) => {
-        console.log("✓ Question READY");
-        // This event fires but doesn't have the actual question data
-        // We'll wait for QuestionStart to get the index
+        console.log("✓ Question READY - Index:", question.questionIndex || question.gameBlockIndex);
+        
+        // Check if this question has data in nextGameBlockData
+        if (question.nextGameBlockData) {
+          const nextQ = question.nextGameBlockData;
+          console.log("Next question data:", JSON.stringify(nextQ, null, 2));
+        }
       });
 
       client.on("QuestionStart", (question: any) => {
         console.log("✓ Question START - Index:", question.gameBlockIndex);
-        currentQuestionIndex = question.gameBlockIndex || 0;
+        console.log("📋 Full QuestionStart data:", JSON.stringify(question, null, 2));
+        console.log("📋 All question properties:", Object.keys(question));
         
-        // If this is not the first question (already sent from QuizStart)
-        // we need to fetch it from somewhere else or wait for the host to provide it
-        // For now, we've already sent the first question from QuizStart
+        const qIndex = question.gameBlockIndex || 0;
+        currentQuestionIndex = qIndex;
+        
+        // Try to extract question text from any available property
+        const questionText = question.title || 
+                           question.question || 
+                           question.text ||
+                           question.questionText ||
+                           (question as any).gameBlock?.question ||
+                           null;
+        
+        console.log("🔍 Extracted question text:", questionText);
+        
+        // Check if we have this question stored
+        if (allQuestions[qIndex]) {
+          console.log("📤 Sending stored question", qIndex);
+          sendEvent("question", {
+            ...allQuestions[qIndex],
+            questionIndex: qIndex,
+          });
+        } else if (questionText) {
+          // If we found question text but no stored data, send just the question
+          console.log("📤 Sending question text only (no answers)");
+          sendEvent("question", {
+            question: questionText,
+            answers: [
+              { text: "Option 1" },
+              { text: "Option 2" },
+              { text: "Option 3" },
+              { text: "Option 4" }
+            ],
+            questionIndex: qIndex,
+            timeLeft: question.timeAvailable,
+          });
+        } else {
+          console.log("⚠️ No data for question", qIndex);
+          // Send a placeholder
+          sendEvent("question", {
+            question: `Question ${qIndex + 1} (Data not available)`,
+            answers: [
+              { text: "Answer 1" },
+              { text: "Answer 2" },
+              { text: "Answer 3" },
+              { text: "Answer 4" }
+            ],
+            questionIndex: qIndex,
+            timeLeft: question.timeAvailable,
+          });
+        }
       });
 
       client.on("QuestionEnd", (result: any) => {
